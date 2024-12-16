@@ -8,6 +8,7 @@ from langdetect.lang_detect_exception import LangDetectException
 import re
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
+import spacy
 
 
 # Configure info-level logging and format for cleaner output
@@ -15,6 +16,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 # Ensure consistent language detection results
 DetectorFactory.seed = 42
+
+# Load the English NLP pipeline
+nlp = spacy.load("en_core_web_sm")
 
 
 # -------------------------------------------
@@ -59,6 +63,16 @@ def to_lowercase(text):
     return text.lower()
 
 
+def lemmatize_text(text):
+    doc = nlp(text)
+    lemmatized_tokens = [
+        token.lemma_
+        for token in doc
+        if not token.is_stop and not token.is_punct and len(token.text) > 2
+    ]
+    return " ".join(lemmatized_tokens)
+
+
 def preprocess_text(text):
     """
     Apply preprocessing steps to clean the input text.
@@ -77,6 +91,7 @@ def preprocess_text(text):
     text = to_lowercase(text)
     # text = remove_stopwords(text)
     # text = remove_non_ascii(text)
+    text = lemmatize_text(text)
     return text
 
 
@@ -136,7 +151,9 @@ def perform_topic_modeling(df, num_topics=10, n_top_words=10):
     df["processed_text"] = df["text"]
 
     # Vectorize text
-    vectorizer = CountVectorizer(stop_words="english", max_features=5000)
+    vectorizer = CountVectorizer(
+        stop_words="english", max_features=5000, max_df=0.85, min_df=5
+    )
     text_matrix = vectorizer.fit_transform(df["processed_text"])
 
     # Fit LDA model
@@ -305,7 +322,7 @@ if __name__ == "__main__":
     conn.close()
 
     # Perform topic modeling
-    num_topics = 5
+    num_topics = 10
     df_with_topics, topics = perform_topic_modeling(
         df_posts, num_topics=num_topics
     )
