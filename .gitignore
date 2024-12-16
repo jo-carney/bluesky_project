@@ -1,0 +1,11 @@
+# Virtual environment
+venv/
+
+# SQLite database
+*.db
+
+# Python cache 
+_pycache_/
+
+# Docker files
+*.pyc
