@@ -6,6 +6,9 @@ import sqlite3
 from langdetect import detect, DetectorFactory
 from langdetect.lang_detect_exception import LangDetectException
 import re
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+
 
 # Configure info-level logging and format for cleaner output
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
@@ -112,6 +115,52 @@ def filter_english_posts(df):
     english_posts = df[df["language"] == "en"]
     logging.info("%d English posts identified.", len(english_posts))
     return english_posts
+
+
+# -------------------------------------------
+# Model Topics
+# -------------------------------------------
+def perform_topic_modeling(df, num_topics=10, n_top_words=10):
+    """
+    Perform topic modeling on text data using LDA.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing a 'text' column.
+        num_topics (int): Number of topics to generate.
+        n_top_words (int): Number of keywords to extract per topic.
+
+    Returns:
+        tuple: (DataFrame with topic assignments, dictionary of topic keywords)
+    """
+    # Preprocess text
+    df["processed_text"] = df["text"]
+
+    # Vectorize text
+    vectorizer = CountVectorizer(stop_words="english", max_features=5000)
+    text_matrix = vectorizer.fit_transform(df["processed_text"])
+
+    # Fit LDA model
+    lda = LatentDirichletAllocation(n_components=num_topics, random_state=42)
+    lda.fit(text_matrix)
+
+    # Extract topic keywords
+    feature_names = vectorizer.get_feature_names_out()
+    topic_keywords = {
+        i: [
+            feature_names[word_idx]
+            for word_idx in topic.argsort()[: -n_top_words - 1 : -1]
+        ]
+        for i, topic in enumerate(lda.components_)
+    }
+
+    # Assign most probable topic to each post
+    topic_assignments = lda.transform(text_matrix).argmax(axis=1)
+    df["topic"] = topic_assignments
+    df["topic_label"] = df["topic"].map(
+        lambda x: f"Topic {x}: {', '.join(topic_keywords[x])}"
+    )
+
+    return df, topic_keywords
 
 
 # -------------------------------------------
@@ -255,12 +304,27 @@ if __name__ == "__main__":
     df_posts = pd.read_sql_query("SELECT * FROM posts", conn)
     conn.close()
 
-    # Step 3: Calculate daily metrics
-    df_posts = add_date_column(df_posts)
+    # Perform topic modeling
+    num_topics = 5
+    df_with_topics, topics = perform_topic_modeling(
+        df_posts, num_topics=num_topics
+    )
 
-    if not df_posts.empty:
+    # Display sample topics
+    print("Sample Topics Assigned to Posts:")
+    print(df_with_topics[["text", "topic_label"]].sample(10))
+
+    # Display extracted keywords for each topic
+    print("\nExtracted Topic Keywords:")
+    for topic, keywords in topics.items():
+        print(f"Topic {topic}: {', '.join(keywords)}")
+
+    # Step 3: Calculate daily metrics
+    df_with_topics = add_date_column(df_with_topics)
+
+    if not df_with_topics.empty:
         logging.info("Calculating daily influencer metrics...")
-        daily_metrics = calculate_daily_metrics(df_posts)
+        daily_metrics = calculate_daily_metrics(df_with_topics)
 
         # Display a sample of daily metrics
         logging.info("Sample of Daily Metrics:")
