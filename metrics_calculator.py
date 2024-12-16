@@ -1,5 +1,9 @@
 import pandas as pd
 import numpy as np
+import logging
+
+# Configure info-level logging and format for cleaner output
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 
 def add_date_column(df):
@@ -12,13 +16,33 @@ def add_date_column(df):
     Returns:
         pd.DataFrame: Updated DataFrame with a 'date' column.
     """
-    if not pd.api.types.is_datetime64_any_dtype(df["created_at"]):
-        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+    df["created_at"] = pd.to_datetime(
+        df["created_at"], errors="coerce", utc=True
+    )
 
-    df = df.dropna(subset=["created_at"])
+    # Drop rows where created_at is invalid
+    invalid_count = df["created_at"].isna().sum()
+    if invalid_count > 0:
+        logging.warning(
+            f"Dropping {invalid_count} rows with invalid 'created_at' values."
+        )
+        df = df.dropna(subset=["created_at"])
+
+    # Ensure all remaining values are datetime
+    if not pd.api.types.is_datetime64_any_dtype(df["created_at"]):
+        raise ValueError(
+            "'created_at' column contains non-datetime values even after conversion."
+        )
+
+    # Debugging: Inspect a sample of the column
+    logging.debug(
+        "Sample 'created_at' values after conversion: %s",
+        df["created_at"].head(),
+    )
 
     # Add the date column
     df.loc[:, "date"] = df["created_at"].dt.date
+    logging.info("Successfully added 'date' column.")
     return df
 
 
