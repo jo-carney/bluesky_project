@@ -123,10 +123,10 @@ def filter_apple_posts(df, keywords):
     Filter posts containing specific Apple-related keywords.
     Use a regex pattern for efficient matching.
     """
-    keyword_pattern = "|".join(re.escape(keyword) for keyword in keywords)
-    apple_posts = df[
-        df["text"].str.contains(keyword_pattern, case=False, na=False)
-    ]
+    keyword_pattern = re.compile(
+        "|".join(re.escape(keyword) for keyword in keywords), re.IGNORECASE
+    )
+    apple_posts = df[df["text"].str.contains(keyword_pattern, na=False)]
     logging.info("%d posts contain Apple-related keywords.", len(apple_posts))
     return apple_posts
 
