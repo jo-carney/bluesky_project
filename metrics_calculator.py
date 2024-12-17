@@ -41,6 +41,7 @@ def add_date_column(df):
     )
 
     # Add the date column
+    df = df.copy()  # Add this line to ensure df is a copy
     df.loc[:, "date"] = df["created_at"].dt.date
     logging.info("Successfully added 'date' column.")
     return df
