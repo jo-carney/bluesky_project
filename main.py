@@ -14,6 +14,9 @@ import re
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
+# Configure testing state
+testing = True
+
 # Initialize Pandarallel for parallel processing
 pandarallel.initialize(nb_workers=8, progress_bar=True, use_memory_fs=False)
 
@@ -22,9 +25,11 @@ DetectorFactory.seed = 42
 
 # Constants
 DB_NAME = "posts.db"
-TABLE_NAME = "posts"
 BATCH_SIZE = 5000
-MAX_BATCHES = 2
+if testing is True:
+    MAX_BATCHES = 2
+else:
+    MAX_BATCHES = None
 
 # Apple-related keywords
 APPLE_KEYWORDS = [
