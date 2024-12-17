@@ -367,6 +367,7 @@ if __name__ == "__main__":
     # Fetch posts and calculate metrics
     with sqlite3.connect(DB_NAME) as conn:
         df_posts = pd.read_sql_query("SELECT * FROM posts", conn)
+
     # Calculate daily metrics
     if not df_posts.empty:
         logging.info("Calculating and upserting daily metrics...")
@@ -376,6 +377,36 @@ if __name__ == "__main__":
 
         # Upsert metrics for each day into the database
         upsert_daily_metrics(daily_metrics)
+
+        # Display top 5 authors in each influencer category by their aggregated metrics
+        logging.info("Displaying top 5 authors in each influencer category:")
+        if "influencer_type" in daily_metrics.columns:
+            # Aggregate metrics by category and author
+            # Summarize multiple days by summing or averaging relevant metrics
+            agg_metrics = daily_metrics.groupby(
+                ["influencer_type", "author"], as_index=False
+            ).agg(
+                {
+                    "post_count": "sum",
+                    "replies_received": "sum",
+                    "engagement_ratio": "mean",
+                }
+            )
+
+            # For each influencer type, sort by post_count and show top 5
+            for cat in agg_metrics["influencer_type"].unique():
+                cat_df = agg_metrics[
+                    agg_metrics["influencer_type"] == cat
+                ].copy()
+                cat_df = cat_df.sort_values(
+                    "post_count", ascending=False
+                ).head(5)
+                logging.info(f"Influencer category: {cat}")
+                logging.info("\n" + cat_df.to_string(index=False))
+        else:
+            logging.warning(
+                "No influencer_type column found in daily_metrics."
+            )
 
         logging.info(
             f"ETL pipeline completed in {time.time() - overall_start:.4f} seconds"
