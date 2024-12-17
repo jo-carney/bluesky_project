@@ -24,7 +24,7 @@ DetectorFactory.seed = 42
 DB_NAME = "posts.db"
 TABLE_NAME = "posts"
 BATCH_SIZE = 5000
-MAX_BATCHES = 10
+MAX_BATCHES = None
 
 # Apple-related keywords
 APPLE_KEYWORDS = [
@@ -139,21 +139,28 @@ def insert_posts_to_db(df, db_name=DB_NAME):
             )
             logging.info("Inserted %d posts into the database.", len(df))
     except Exception as e:
-        logging.error(f"Failed to insert posts: {e}")
+        logging.exception(f"An error occurred: {e}")
 
 
-def upsert_daily_metrics(new_metrics, db_name=DB_NAME):
+def validate_metrics_schema(db_name=DB_NAME):
     """
-    Upsert (update or insert) daily metrics into the 'metrics' table.
+    Ensure the 'metrics' table exists with the required schema and validate it.
 
     Args:
-        new_metrics (pd.DataFrame): DataFrame containing daily metrics to upsert.
-        db_name (str): SQLite database name.
+        db_name (str): SQLite database file.
     """
-    logging.info("Upserting daily metrics into the database...")
+    required_columns = {
+        "date",
+        "author",
+        "post_count",
+        "replies_received",
+        "matched_keywords",
+        "engagement_ratio",
+        "influencer_type",
+    }
 
     with sqlite3.connect(db_name) as conn:
-        # Ensure the metrics table exists
+        # Create the metrics table if it does not exist
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS metrics (
@@ -168,30 +175,63 @@ def upsert_daily_metrics(new_metrics, db_name=DB_NAME):
             )
             """
         )
+        logging.info("Ensured 'metrics' table exists.")
 
-        # Create a temporary table to hold new metrics
-        conn.execute("DROP TABLE IF EXISTS metrics_temp")
-        new_metrics.to_sql(
-            "metrics_temp", conn, if_exists="replace", index=False
-        )
+        # Validate the schema
+        cursor = conn.execute(f"PRAGMA table_info(metrics)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
 
-        # Use a manual upsert: DELETE conflicting rows and INSERT fresh data
-        conn.execute(
-            """
-            DELETE FROM metrics
-            WHERE (date, author) IN (SELECT date, author FROM metrics_temp)
-            """
+    missing_columns = required_columns - existing_columns
+    if missing_columns:
+        raise ValueError(
+            f"Missing columns in 'metrics' table: {missing_columns}"
         )
-        conn.execute(
-            """
-            INSERT INTO metrics (date, author, post_count, replies_received, matched_keywords, engagement_ratio, influencer_type)
-            SELECT date, author, post_count, replies_received, matched_keywords, engagement_ratio, influencer_type
-            FROM metrics_temp
-            """
-        )
+    logging.info("Schema validation passed for 'metrics' table.")
 
-        # Drop the temporary table
-        conn.execute("DROP TABLE IF EXISTS metrics_temp")
+
+def upsert_daily_metrics(new_metrics, db_name=DB_NAME):
+    """
+    Upsert (update or insert) daily metrics into the 'metrics' table.
+
+    Args:
+        new_metrics (pd.DataFrame): DataFrame containing daily metrics to upsert.
+        db_name (str): SQLite database name.
+    """
+    logging.info("Upserting daily metrics into the database...")
+
+    # Ensure schema is correct
+    try:
+        validate_metrics_schema(db_name)
+    except ValueError as e:
+        logging.exception("Schema validation failed. Aborting upsert.")
+        return
+
+    with sqlite3.connect(db_name) as conn:
+        for _, row in new_metrics.iterrows():
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO metrics (date, author, post_count, replies_received, matched_keywords, engagement_ratio, influencer_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(date, author) DO UPDATE SET
+                        post_count=excluded.post_count,
+                        replies_received=excluded.replies_received,
+                        matched_keywords=excluded.matched_keywords,
+                        engagement_ratio=excluded.engagement_ratio,
+                        influencer_type=excluded.influencer_type
+                    """,
+                    (
+                        row["date"],
+                        row["author"],
+                        row["post_count"],
+                        row["replies_received"],
+                        row["matched_keywords"],
+                        row["engagement_ratio"],
+                        row["influencer_type"],
+                    ),
+                )
+            except Exception as e:
+                logging.exception(f"An error occurred: {e}")
 
     logging.info("Daily metrics upserted successfully.")
 
