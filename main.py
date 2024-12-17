@@ -7,7 +7,7 @@ from langdetect import detect, DetectorFactory
 from langdetect.lang_detect_exception import LangDetectException
 import re
 from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.decomposition import NMF
 import spacy
 
 
@@ -137,7 +137,7 @@ def filter_english_posts(df):
 # -------------------------------------------
 def perform_topic_modeling(df, num_topics=10, n_top_words=10):
     """
-    Perform topic modeling on text data using LDA.
+    Perform topic modeling on text data using NMF (Non-negative Matrix Factorization).
 
     Args:
         df (pd.DataFrame): DataFrame containing a 'text' column.
@@ -151,14 +151,27 @@ def perform_topic_modeling(df, num_topics=10, n_top_words=10):
     df["processed_text"] = df["text"]
 
     # Vectorize text
+    custom_stop_words = list(spacy.lang.en.stop_words.STOP_WORDS) + [
+        "yeah",
+        "fuck",
+        "man",
+        "thing",
+        "look",
+        "come",
+        "time",
+        "like",
+        "know",
+    ]
+
     vectorizer = CountVectorizer(
-        stop_words="english", max_features=5000, max_df=0.85, min_df=5
+        stop_words=custom_stop_words, max_features=5000, max_df=0.85, min_df=5
     )
+
     text_matrix = vectorizer.fit_transform(df["processed_text"])
 
-    # Fit LDA model
-    lda = LatentDirichletAllocation(n_components=num_topics, random_state=42)
-    lda.fit(text_matrix)
+    # Fit NMF model
+    nmf = NMF(n_components=num_topics, random_state=42)
+    nmf_matrix = nmf.fit_transform(text_matrix)
 
     # Extract topic keywords
     feature_names = vectorizer.get_feature_names_out()
@@ -167,11 +180,11 @@ def perform_topic_modeling(df, num_topics=10, n_top_words=10):
             feature_names[word_idx]
             for word_idx in topic.argsort()[: -n_top_words - 1 : -1]
         ]
-        for i, topic in enumerate(lda.components_)
+        for i, topic in enumerate(nmf.components_)
     }
 
     # Assign most probable topic to each post
-    topic_assignments = lda.transform(text_matrix).argmax(axis=1)
+    topic_assignments = nmf_matrix.argmax(axis=1)
     df["topic"] = topic_assignments
     df["topic_label"] = df["topic"].map(
         lambda x: f"Topic {x}: {', '.join(topic_keywords[x])}"
@@ -245,7 +258,7 @@ if __name__ == "__main__":
 
     # Process the dataset in batches
     batch_size = 1000
-    max_batches = 2  # Limit to 2 batches for testing
+    max_batches = 5
     batch = []
     total_batches = 0
     total_posts = 0
@@ -322,7 +335,7 @@ if __name__ == "__main__":
     conn.close()
 
     # Perform topic modeling
-    num_topics = 10
+    num_topics = 5
     df_with_topics, topics = perform_topic_modeling(
         df_posts, num_topics=num_topics
     )
