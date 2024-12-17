@@ -24,7 +24,7 @@ DetectorFactory.seed = 42
 DB_NAME = "posts.db"
 TABLE_NAME = "posts"
 BATCH_SIZE = 5000
-MAX_BATCHES = None
+MAX_BATCHES = 2
 
 # Apple-related keywords
 APPLE_KEYWORDS = [
@@ -89,15 +89,7 @@ def preload_existing_uris(db_name=DB_NAME):
     return set(result["uri"].tolist())
 
 
-def drop_table(db_name=DB_NAME):
-    """Drop the 'posts' table if it exists."""
-    with sqlite3.connect(db_name) as conn:
-        conn.execute("DROP TABLE IF EXISTS posts")
-        conn.execute("DROP TABLE IF EXISTS metrics")
-    logging.info("Dropped 'posts' and 'metrics' table.")
-
-
-def create_database(db_name="posts.db"):
+def create_database(db_name=DB_NAME):
     """
     Create a SQLite database and initialize the 'posts' table.
 
@@ -116,9 +108,31 @@ def create_database(db_name="posts.db"):
                 matched_keywords TEXT,
                 language TEXT
             )
-        """
+            """
         )
-    logging.info("Database initialized with 'posts' table.")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metrics (
+                date TEXT NOT NULL,
+                author TEXT NOT NULL,
+                post_count INTEGER,
+                replies_received INTEGER,
+                matched_keywords TEXT,
+                engagement_ratio REAL,
+                influencer_type TEXT,
+                PRIMARY KEY (date, author)
+            )
+            """
+        )
+    logging.info("Database initialized with 'posts' and 'metrics' tables.")
+
+
+def drop_table(db_name=DB_NAME):
+    """Drop the 'posts' table if it exists."""
+    with sqlite3.connect(db_name) as conn:
+        conn.execute("DROP TABLE IF EXISTS posts")
+        conn.execute("DROP TABLE IF EXISTS metrics")
+    logging.info("Dropped 'posts' and 'metrics' table.")
 
 
 def insert_posts_to_db(df, db_name=DB_NAME):
@@ -132,6 +146,14 @@ def insert_posts_to_db(df, db_name=DB_NAME):
     if df.empty:
         logging.info("No posts to insert into the database.")
         return
+
+    # Ensure schema is correct
+    try:
+        validate_posts_schema(db_name)
+    except ValueError as e:
+        logging.exception(f"An error occurred: {e}")
+        return
+
     try:
         with sqlite3.connect(db_name) as conn:
             df.to_sql(
@@ -140,6 +162,36 @@ def insert_posts_to_db(df, db_name=DB_NAME):
             logging.info("Inserted %d posts into the database.", len(df))
     except Exception as e:
         logging.exception(f"An error occurred: {e}")
+
+
+def validate_posts_schema(db_name=DB_NAME):
+    """
+    Ensure the 'posts' table exists with the required schema and validate it.
+
+    Args:
+        db_name (str): SQLite database file.
+    """
+    required_columns = {
+        "uri",
+        "text",
+        "author",
+        "reply_to",
+        "created_at",
+        "matched_keywords",
+        "language",
+    }
+
+    with sqlite3.connect(db_name) as conn:
+        # Validate the schema
+        cursor = conn.execute(f"PRAGMA table_info(posts)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+    missing_columns = required_columns - existing_columns
+    if missing_columns:
+        raise ValueError(
+            f"Missing columns in 'posts' table: {missing_columns}"
+        )
+    logging.info("Schema validation passed for 'posts' table.")
 
 
 def validate_metrics_schema(db_name=DB_NAME):
@@ -160,23 +212,6 @@ def validate_metrics_schema(db_name=DB_NAME):
     }
 
     with sqlite3.connect(db_name) as conn:
-        # Create the metrics table if it does not exist
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS metrics (
-                date TEXT NOT NULL,
-                author TEXT NOT NULL,
-                post_count INTEGER,
-                replies_received INTEGER,
-                matched_keywords TEXT,
-                engagement_ratio REAL,
-                influencer_type TEXT,
-                PRIMARY KEY (date, author)
-            )
-            """
-        )
-        logging.info("Ensured 'metrics' table exists.")
-
         # Validate the schema
         cursor = conn.execute(f"PRAGMA table_info(metrics)")
         existing_columns = {row[1] for row in cursor.fetchall()}
@@ -203,7 +238,7 @@ def upsert_daily_metrics(new_metrics, db_name=DB_NAME):
     try:
         validate_metrics_schema(db_name)
     except ValueError as e:
-        logging.exception("Schema validation failed. Aborting upsert.")
+        logging.exception(f"An error occurred: {e}")
         return
 
     with sqlite3.connect(db_name) as conn:
