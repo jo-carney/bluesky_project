@@ -2,11 +2,11 @@ from datasets import load_dataset
 import pandas as pd
 import logging
 import sqlite3
-from langdetect import detect, DetectorFactory
-from langdetect.lang_detect_exception import LangDetectException
 from pandarallel import pandarallel
 from metrics_calculator import calculate_daily_metrics, add_date_column
 import re
+import time
+import functools
 
 # -------------------------------------------
 # Configuration
@@ -20,14 +20,11 @@ testing = True
 # Initialize Pandarallel for parallel processing
 pandarallel.initialize(nb_workers=8, progress_bar=True, use_memory_fs=False)
 
-# Language detection consistency
-DetectorFactory.seed = 42
-
 # Constants
 DB_NAME = "posts.db"
-BATCH_SIZE = 5000
+BATCH_SIZE = 100000
 if testing is True:
-    MAX_BATCHES = 2
+    MAX_BATCHES = 1
 else:
     MAX_BATCHES = None
 
@@ -74,18 +71,25 @@ APPLE_KEYWORDS_REGEX = re.compile(
 # -------------------------------------------
 # Functions
 # -------------------------------------------
-def detect_language_batch(texts):
-    """Detect language for a batch of text inputs in parallel."""
+def timing_decorator(func):
+    """
+    A decorator to measure the execution time of a function.
+    """
 
-    def detect_lang(text):
-        try:
-            return "en" if detect(text) == "en" else None
-        except LangDetectException:
-            return None
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        logging.info(
+            f"Function '{func.__name__}' executed in {end_time - start_time:.4f} seconds"
+        )
+        return result
 
-    return pd.Series(texts).parallel_apply(detect_lang)
+    return wrapper
 
 
+@timing_decorator
 def preload_existing_uris(db_name=DB_NAME):
     """Preload existing URIs from the database into a set for fast lookups."""
     with sqlite3.connect(db_name) as conn:
@@ -94,6 +98,7 @@ def preload_existing_uris(db_name=DB_NAME):
     return set(result["uri"].tolist())
 
 
+@timing_decorator
 def create_database(db_name=DB_NAME):
     """
     Create a SQLite database and initialize the 'posts' table.
@@ -110,8 +115,7 @@ def create_database(db_name=DB_NAME):
                 author TEXT,
                 reply_to TEXT,
                 created_at TEXT,
-                matched_keywords TEXT,
-                language TEXT
+                matched_keywords TEXT
             )
             """
         )
@@ -132,17 +136,19 @@ def create_database(db_name=DB_NAME):
     logging.info("Database initialized with 'posts' and 'metrics' tables.")
 
 
+@timing_decorator
 def drop_table(db_name=DB_NAME):
-    """Drop the 'posts' table if it exists."""
+    """Drop the 'posts' and 'metrics' table if they exist."""
     with sqlite3.connect(db_name) as conn:
         conn.execute("DROP TABLE IF EXISTS posts")
         conn.execute("DROP TABLE IF EXISTS metrics")
     logging.info("Dropped 'posts' and 'metrics' table.")
 
 
+@timing_decorator
 def insert_posts_to_db(df, db_name=DB_NAME):
     """
-    Insert posts into the database while ensuring unique URIs.
+    Insert posts into the database.
 
     Args:
         df (pd.DataFrame): DataFrame of posts to insert.
@@ -169,6 +175,7 @@ def insert_posts_to_db(df, db_name=DB_NAME):
         logging.exception(f"An error occurred: {e}")
 
 
+@timing_decorator
 def validate_posts_schema(db_name=DB_NAME):
     """
     Ensure the 'posts' table exists with the required schema and validate it.
@@ -183,7 +190,6 @@ def validate_posts_schema(db_name=DB_NAME):
         "reply_to",
         "created_at",
         "matched_keywords",
-        "language",
     }
 
     with sqlite3.connect(db_name) as conn:
@@ -199,6 +205,7 @@ def validate_posts_schema(db_name=DB_NAME):
     logging.info("Schema validation passed for 'posts' table.")
 
 
+@timing_decorator
 def validate_metrics_schema(db_name=DB_NAME):
     """
     Ensure the 'metrics' table exists with the required schema and validate it.
@@ -229,6 +236,7 @@ def validate_metrics_schema(db_name=DB_NAME):
     logging.info("Schema validation passed for 'metrics' table.")
 
 
+@timing_decorator
 def upsert_daily_metrics(new_metrics, db_name=DB_NAME):
     """
     Upsert (update or insert) daily metrics into the 'metrics' table.
@@ -276,27 +284,33 @@ def upsert_daily_metrics(new_metrics, db_name=DB_NAME):
     logging.info("Daily metrics upserted successfully.")
 
 
+@timing_decorator
+def find_keywords(text_lower):
+    found = [kw for kw in APPLE_KEYWORDS if kw in text_lower]
+    return ", ".join(found) if found else ""
+
+
+@timing_decorator
 def process_batch(batch, existing_uris):
-    """Process a batch of data: filter duplicates, detect language, and match keywords."""
+    """Process a batch of data: filter duplicates and match Apple-related keywords."""
     df = pd.DataFrame(batch)
     logging.info("Filtering out existing URIs...")
     df = df[~df["uri"].isin(existing_uris)].copy()
     if df.empty:
         logging.info("No new URIs to process in this batch.")
         return df
-    logging.info("Detecting language in batch...")
-    df["language"] = detect_language_batch(df["text"])
-    df = df[df["language"] == "en"].copy()
+
+    # Replace the old regex-based keyword matching with the substring approach
     logging.info("Matching Apple-related keywords...")
-    df["matched_keywords"] = (
-        df["text"]
-        .str.findall(APPLE_KEYWORDS_REGEX)
-        .apply(lambda x: ", ".join(set(x)) if x else "")
-    )
+    df["text_lower"] = df["text"].str.lower()  # Convert once
+    df["matched_keywords"] = df["text_lower"].apply(find_keywords)
+    df.drop(columns=["text_lower"], inplace=True)
+
     df = df[df["matched_keywords"] != ""].copy()
     logging.info(
         "Filtered to %d posts containing Apple-related keywords.", len(df)
     )
+    return df
     return df
 
 
@@ -304,6 +318,7 @@ def process_batch(batch, existing_uris):
 # Main ETL Pipeline
 # -------------------------------------------
 if __name__ == "__main__":
+    overall_start = time.time()
     # Drop and recreate the database
     drop_table()
     create_database()
@@ -361,5 +376,9 @@ if __name__ == "__main__":
 
         # Upsert metrics for each day into the database
         upsert_daily_metrics(daily_metrics)
+
+        logging.info(
+            f"ETL pipeline completed in {time.time() - overall_start:.4f} seconds"
+        )
     else:
         logging.warning("No posts found in the database to calculate metrics.")
