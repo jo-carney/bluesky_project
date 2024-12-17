@@ -135,61 +135,70 @@ def categorize_influencers(metrics):
     return metrics
 
 
+import numpy as np
+import pandas as pd
+import logging
+
+
 def calculate_daily_metrics(df):
     """
-    Calculate daily influencer metrics, including post count, replies received,
-    engagement ratio, audience builders, and influencer categories.
+    Calculate daily metrics for posts, aggregating by date and author.
 
     Args:
-        df (pd.DataFrame): DataFrame containing posts data.
+        df (pd.DataFrame): Input DataFrame containing posts with 'date', 'author', and 'matched_keywords'.
 
     Returns:
-        pd.DataFrame: A DataFrame with daily metrics for each user.
+        pd.DataFrame: Aggregated metrics per day and author with influencer categorization.
     """
-    # Add date column
-    df = add_date_column(df)
+    logging.info(
+        "Calculating daily metrics and aggregating by date and author..."
+    )
 
-    # Create a post-to-author lookup
-    post_author_lookup = create_post_author_lookup(df)
+    # Ensure 'date' column exists
+    if "date" not in df.columns:
+        df["date"] = pd.to_datetime(df["created_at"]).dt.date
 
-    # Map replies to their original authors
-    df = map_replies_to_authors(df, post_author_lookup)
+    # Define a function to aggregate and deduplicate keywords
+    def aggregate_keywords(keywords):
+        flat_list = ", ".join(filter(None, keywords)).split(", ")
+        return ", ".join(sorted(set(flat_list)))
 
-    # Initialize an empty list to store daily metrics
-    daily_metrics = []
+    # Aggregate metrics by date and author
+    daily_metrics = df.groupby(["date", "author"], as_index=False).agg(
+        post_count=("uri", "count"),
+        replies_received=("reply_to", "count"),
+        matched_keywords=("matched_keywords", aggregate_keywords),
+    )
 
-    # Group data by 'date'
-    for date, group in df.groupby("date"):
-        # Calculate post count
-        post_count = calculate_post_count(group)
+    # Add engagement ratio
+    daily_metrics["engagement_ratio"] = (
+        daily_metrics["replies_received"] / daily_metrics["post_count"]
+    )
+    daily_metrics.fillna({"engagement_ratio": 0}, inplace=True)
 
-        # Calculate replies received
-        replies_received = calculate_replies_received(group)
+    # Add influencer type categorization
+    logging.info("Categorizing influencer types...")
+    conditions = [
+        (daily_metrics["post_count"] > daily_metrics["post_count"].median())
+        & (
+            daily_metrics["replies_received"]
+            > daily_metrics["replies_received"].median()
+        ),
+        (daily_metrics["post_count"] <= daily_metrics["post_count"].median())
+        & (
+            daily_metrics["replies_received"]
+            > daily_metrics["replies_received"].median()
+        ),
+        (daily_metrics["post_count"] > daily_metrics["post_count"].median())
+        & (
+            daily_metrics["replies_received"]
+            <= daily_metrics["replies_received"].median()
+        ),
+    ]
+    categories = ["Influential Creator", "Thought Leader", "Broadcaster"]
+    daily_metrics["influencer_type"] = np.select(
+        conditions, categories, default="General User"
+    )
 
-        # Merge metrics
-        metrics = pd.merge(
-            post_count, replies_received, on="author", how="outer"
-        ).fillna(0)
-        metrics["engagement_ratio"] = (
-            metrics["replies_received"] / metrics["post_count"]
-        )
-
-        # Calculate audience builders
-        audience_builders = calculate_audience_builders(group)
-
-        # Merge audience builders into metrics
-        metrics = pd.merge(
-            metrics, audience_builders, on="author", how="left"
-        ).fillna(0)
-
-        # Categorize influencers
-        metrics = categorize_influencers(metrics)
-
-        # Add the date column to the results
-        metrics["date"] = date
-
-        # Append to results
-        daily_metrics.append(metrics)
-
-    # Combine all daily results into a single DataFrame
-    return pd.concat(daily_metrics, ignore_index=True)
+    logging.info("Daily metrics successfully calculated.")
+    return daily_metrics

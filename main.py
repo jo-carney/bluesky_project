@@ -4,14 +4,18 @@ import logging
 import sqlite3
 from langdetect import detect, DetectorFactory
 from langdetect.lang_detect_exception import LangDetectException
+from pandarallel import pandarallel
 from metrics_calculator import calculate_daily_metrics, add_date_column
 import re
 
 # -------------------------------------------
 # Configuration
 # -------------------------------------------
-# Logging setup
+# Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+
+# Initialize Pandarallel for parallel processing
+pandarallel.initialize(nb_workers=8, progress_bar=True, use_memory_fs=False)
 
 # Language detection consistency
 DetectorFactory.seed = 42
@@ -19,7 +23,7 @@ DetectorFactory.seed = 42
 # Constants
 DB_NAME = "posts.db"
 TABLE_NAME = "posts"
-BATCH_SIZE = 500
+BATCH_SIZE = 5000
 MAX_BATCHES = 10
 
 # Apple-related keywords
@@ -61,102 +65,36 @@ APPLE_KEYWORDS_REGEX = re.compile(
     r"|".join(rf"\b{re.escape(kw)}\b" for kw in APPLE_KEYWORDS), re.IGNORECASE
 )
 
+
 # -------------------------------------------
 # Functions
 # -------------------------------------------
+def detect_language_batch(texts):
+    """Detect language for a batch of text inputs in parallel."""
+
+    def detect_lang(text):
+        try:
+            return "en" if detect(text) == "en" else None
+        except LangDetectException:
+            return None
+
+    return pd.Series(texts).parallel_apply(detect_lang)
 
 
-def detect_language(text):
-    """
-    Detect the language of a given text using langdetect.
-
-    Args:
-        text (str): Input text string.
-
-    Returns:
-        str: 'en' if detected as English; otherwise None.
-    """
-    try:
-        return "en" if detect(text) == "en" else None
-    except LangDetectException:
-        return None
-
-
-def filter_english_and_apple_posts(df, keyword_regex):
-    """
-    Filter posts to include only English-language posts with Apple-related keywords.
-
-    Args:
-        df (pd.DataFrame): Input DataFrame with 'text' column.
-        keyword_regex (re.Pattern): Compiled regex for matching Apple-related keywords.
-
-    Returns:
-        pd.DataFrame: Filtered DataFrame containing English Apple-related posts.
-    """
-    logging.info("Filtering posts for English language...")
-    df = df[
-        df["text"].apply(lambda text: detect_language(text) == "en")
-    ].copy()
-
-    def find_keywords(text):
-        matches = re.findall(keyword_regex, text)
-        return ", ".join(
-            set(matches)
-        )  # Return unique matched keywords as a string
-
-    logging.info("Filtering posts for Apple-related keywords...")
-    df["matched_keywords"] = df["text"].apply(
-        find_keywords
-    )  # Add matched keywords column
-    df = df[
-        df["matched_keywords"] != ""
-    ].copy()  # Ensure no SettingWithCopyWarning
-
-    return df
-
-
-def remove_duplicate_uris(df):
-    """
-    Remove duplicate 'uri' values within a DataFrame.
-
-    Args:
-        df (pd.DataFrame): DataFrame containing posts.
-
-    Returns:
-        pd.DataFrame: DataFrame with duplicate 'uri' values removed.
-    """
-    df = df.drop_duplicates(subset=["uri"])
-    return df
-
-
-def filter_existing_uris(df, db_name="posts.db"):
-    """
-    Remove rows with 'uri' values already present in the database.
-
-    Args:
-        df (pd.DataFrame): DataFrame to filter.
-        db_name (str): SQLite database file name.
-
-    Returns:
-        pd.DataFrame: Filtered DataFrame excluding existing 'uri' values.
-    """
+def preload_existing_uris(db_name=DB_NAME):
+    """Preload existing URIs from the database into a set for fast lookups."""
     with sqlite3.connect(db_name) as conn:
-        existing_uris = pd.read_sql_query("SELECT uri FROM posts", conn)[
-            "uri"
-        ].tolist()
-    return df[~df["uri"].isin(existing_uris)]
+        logging.info("Loading existing URIs from the database...")
+        result = pd.read_sql_query("SELECT uri FROM posts", conn)
+    return set(result["uri"].tolist())
 
 
-def drop_table(db_name="posts.db"):
-    """
-    Drop the 'posts' table if it exists in the database.
-
-    Args:
-        db_name (str): Name of the SQLite database file.
-    """
+def drop_table(db_name=DB_NAME):
+    """Drop the 'posts' table if it exists."""
     with sqlite3.connect(db_name) as conn:
         conn.execute("DROP TABLE IF EXISTS posts")
-    logging.info("Dropped 'posts' table.")
+        conn.execute("DROP TABLE IF EXISTS metrics")
+    logging.info("Dropped 'posts' and 'metrics' table.")
 
 
 def create_database(db_name="posts.db"):
@@ -175,14 +113,15 @@ def create_database(db_name="posts.db"):
                 author TEXT,
                 reply_to TEXT,
                 created_at TEXT,
-                matched_keywords TEXT
+                matched_keywords TEXT,
+                language TEXT
             )
-            """
+        """
         )
     logging.info("Database initialized with 'posts' table.")
 
 
-def insert_posts_to_db(df, db_name="posts.db"):
+def insert_posts_to_db(df, db_name=DB_NAME):
     """
     Insert posts into the database while ensuring unique URIs.
 
@@ -193,20 +132,99 @@ def insert_posts_to_db(df, db_name="posts.db"):
     if df.empty:
         logging.info("No posts to insert into the database.")
         return
+    try:
+        with sqlite3.connect(db_name) as conn:
+            df.to_sql(
+                "posts", conn, if_exists="append", index=False, method="multi"
+            )
+            logging.info("Inserted %d posts into the database.", len(df))
+    except Exception as e:
+        logging.error(f"Failed to insert posts: {e}")
+
+
+def upsert_daily_metrics(new_metrics, db_name=DB_NAME):
+    """
+    Upsert (update or insert) daily metrics into the 'metrics' table.
+
+    Args:
+        new_metrics (pd.DataFrame): DataFrame containing daily metrics to upsert.
+        db_name (str): SQLite database name.
+    """
+    logging.info("Upserting daily metrics into the database...")
 
     with sqlite3.connect(db_name) as conn:
-        df.to_sql(
-            "posts", conn, if_exists="append", index=False, method="multi"
+        # Ensure the metrics table exists
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metrics (
+                date TEXT NOT NULL,
+                author TEXT NOT NULL,
+                post_count INTEGER,
+                replies_received INTEGER,
+                matched_keywords TEXT,
+                engagement_ratio REAL,
+                influencer_type TEXT,
+                PRIMARY KEY (date, author)
+            )
+            """
         )
-    logging.info("Inserted %d posts into the database.", len(df))
+
+        # Create a temporary table to hold new metrics
+        conn.execute("DROP TABLE IF EXISTS metrics_temp")
+        new_metrics.to_sql(
+            "metrics_temp", conn, if_exists="replace", index=False
+        )
+
+        # Use a manual upsert: DELETE conflicting rows and INSERT fresh data
+        conn.execute(
+            """
+            DELETE FROM metrics
+            WHERE (date, author) IN (SELECT date, author FROM metrics_temp)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO metrics (date, author, post_count, replies_received, matched_keywords, engagement_ratio, influencer_type)
+            SELECT date, author, post_count, replies_received, matched_keywords, engagement_ratio, influencer_type
+            FROM metrics_temp
+            """
+        )
+
+        # Drop the temporary table
+        conn.execute("DROP TABLE IF EXISTS metrics_temp")
+
+    logging.info("Daily metrics upserted successfully.")
+
+
+def process_batch(batch, existing_uris):
+    """Process a batch of data: filter duplicates, detect language, and match keywords."""
+    df = pd.DataFrame(batch)
+    logging.info("Filtering out existing URIs...")
+    df = df[~df["uri"].isin(existing_uris)].copy()
+    if df.empty:
+        logging.info("No new URIs to process in this batch.")
+        return df
+    logging.info("Detecting language in batch...")
+    df["language"] = detect_language_batch(df["text"])
+    df = df[df["language"] == "en"].copy()
+    logging.info("Matching Apple-related keywords...")
+    df["matched_keywords"] = (
+        df["text"]
+        .str.findall(APPLE_KEYWORDS_REGEX)
+        .apply(lambda x: ", ".join(set(x)) if x else "")
+    )
+    df = df[df["matched_keywords"] != ""].copy()
+    logging.info(
+        "Filtered to %d posts containing Apple-related keywords.", len(df)
+    )
+    return df
 
 
 # -------------------------------------------
 # Main ETL Pipeline
 # -------------------------------------------
-
 if __name__ == "__main__":
-    # Initialize the database
+    # Drop and recreate the database
     drop_table()
     create_database()
 
@@ -216,15 +234,15 @@ if __name__ == "__main__":
         "alpindale/two-million-bluesky-posts", split="train", streaming=True
     )
 
-    # Batch processing configuration
-    batch_size = 500
+    # Preload existing URIs
+    existing_uris = preload_existing_uris(DB_NAME)
+
     total_batches = 0
     apple_posts_count = 0
     batch = []
 
-    # Main loop to process dataset
+    # Process dataset in batches
     for row in dataset:
-        # Append row to batch
         batch.append(
             {
                 "uri": row["uri"],
@@ -234,51 +252,34 @@ if __name__ == "__main__":
                 "created_at": row["created_at"],
             }
         )
-
-        # Process when batch size is reached
         if len(batch) >= BATCH_SIZE:
             logging.info(f"Processing batch {total_batches + 1}...")
-            df = pd.DataFrame(batch)
-
-            # Step 1: Filter English and Apple-related posts
-            df_filtered = filter_english_and_apple_posts(
-                df, APPLE_KEYWORDS_REGEX
-            )
-
-            # Step 2: Remove duplicates and filter existing URIs
-            df_filtered = remove_duplicate_uris(df_filtered)
-            df_filtered = filter_existing_uris(df_filtered)
-
-            # Step 3: Insert into database
-            insert_posts_to_db(df_filtered)
-
-            apple_posts_count += len(df_filtered)
+            df_filtered = process_batch(batch, existing_uris)
+            if not df_filtered.empty:
+                insert_posts_to_db(df_filtered)
+                apple_posts_count += len(df_filtered)
+                existing_uris.update(df_filtered["uri"])
             batch.clear()
             total_batches += 1
-            logging.info(
-                f"Total Apple-related posts so far: {apple_posts_count}"
-            )
-
             if MAX_BATCHES is not None and total_batches >= MAX_BATCHES:
                 logging.info("Max batch limit reached. Stopping processing.")
                 break
 
-    # Log final summary
     logging.info(
         f"ETL pipeline completed. Total Apple-related posts: {apple_posts_count}."
     )
 
-    # Fetch posts from the database
-    with sqlite3.connect("posts.db") as conn:
+    # Fetch posts and calculate metrics
+    with sqlite3.connect(DB_NAME) as conn:
         df_posts = pd.read_sql_query("SELECT * FROM posts", conn)
-
-    # Calculate and display metrics
+    # Calculate daily metrics
     if not df_posts.empty:
-        logging.info("Calculating daily metrics for Apple-related posts...")
-        # Add date column if not already added
+        logging.info("Calculating and upserting daily metrics...")
+
+        df_posts = add_date_column(df_posts)
         daily_metrics = calculate_daily_metrics(df_posts)
 
-        logging.info("\n--- Daily Influencer Metrics ---\n")
-        print(daily_metrics.head(10))  # Display top 10 rows of metrics
+        # Upsert metrics for each day into the database
+        upsert_daily_metrics(daily_metrics)
     else:
         logging.warning("No posts found in the database to calculate metrics.")
