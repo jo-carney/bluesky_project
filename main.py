@@ -6,8 +6,6 @@ import sqlite3
 from langdetect import detect, DetectorFactory
 from langdetect.lang_detect_exception import LangDetectException
 import re
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.decomposition import NMF
 import spacy
 
 
@@ -20,79 +18,67 @@ DetectorFactory.seed = 42
 # Load the English NLP pipeline
 nlp = spacy.load("en_core_web_sm")
 
+# Define Apple-related keywords
+KEYWORDS = {
+    "products": [
+        "iphone",
+        "iphones",
+        "ipad",
+        "ipad pro",
+        "macbook",
+        "mac",
+        "mac mini",
+        "mac studio",
+        "airpods",
+        "apple watch",
+        "watch ultra",
+        "apple tv",
+        "vision pro",
+        "apple pencil",
+    ],
+    "software": [
+        "ios",
+        "ipados",
+        "macos",
+        "safari",
+        "facetime",
+        "siri",
+        "icloud",
+        "airdrop",
+    ],
+    "chips": ["m1", "m2", "m3", "a17", "a16", "apple silicon"],
+    "branding": [
+        "apple",
+        "tim cook",
+        "apple store",
+        "apple music",
+        "apple care",
+    ],
+}
+
 
 # -------------------------------------------
 # Text Preprocessing
 # -------------------------------------------
-def normalize_whitespace(text):
+def preprocess_texts_in_batch(texts):
     """
-    Normalize whitespace in the text by replacing multiple spaces or newlines with a single space.
-
+    Preprocess a list of texts in a batch using Spacy pipeline.
     Args:
-        text (str): Input text.
-
+        texts (list): List of raw text strings.
     Returns:
-        str: Text with normalized whitespace.
+        list: Preprocessed text strings.
     """
-    return " ".join(text.split())
-
-
-def remove_special_characters(text):
-    """
-    Remove special characters from the text.
-
-    Args:
-        text (str): Input text.
-
-    Returns:
-        str: Text without special characters.
-    """
-    return re.sub(r"[^a-zA-Z0-9\s]", "", text)
-
-
-def to_lowercase(text):
-    """
-    Convert text to lowercase.
-
-    Args:
-        text (str): Input text.
-
-    Returns:
-        str: Text in lowercase.
-    """
-    return text.lower()
-
-
-def lemmatize_text(text):
-    doc = nlp(text)
-    lemmatized_tokens = [
-        token.lemma_
-        for token in doc
-        if not token.is_stop and not token.is_punct and len(token.text) > 2
+    docs = list(
+        nlp.pipe(texts, disable=["ner", "parser"])
+    )  # Disable unneeded components
+    return [
+        " ".join(
+            token.lemma_
+            for token in doc
+            if not token.is_stop and not token.is_punct and len(token.text) > 2
+        )
+        for doc in docs
     ]
-    return " ".join(lemmatized_tokens)
-
-
-def preprocess_text(text):
-    """
-    Apply preprocessing steps to clean the input text.
-
-    Args:
-        text (str): Input text.
-
-    Returns:
-        str: Preprocessed text.
-    """
-    # text = remove_emojis(text)
-    text = remove_special_characters(text)
-    text = normalize_whitespace(text)
-    # text = remove_urls(text)
-    # text = remove_mentions_and_hashtags(text)
-    text = to_lowercase(text)
-    # text = remove_stopwords(text)
-    # text = remove_non_ascii(text)
-    text = lemmatize_text(text)
-    return text
 
 
 # -------------------------------------------
@@ -132,65 +118,61 @@ def filter_english_posts(df):
     return english_posts
 
 
-# -------------------------------------------
-# Model Topics
-# -------------------------------------------
-def perform_topic_modeling(df, num_topics=10, n_top_words=10):
+def filter_apple_posts(df, keywords):
     """
-    Perform topic modeling on text data using NMF (Non-negative Matrix Factorization).
+    Filter posts containing specific Apple-related keywords.
+    Use a regex pattern for efficient matching.
+    """
+    keyword_pattern = "|".join(re.escape(keyword) for keyword in keywords)
+    apple_posts = df[
+        df["text"].str.contains(keyword_pattern, case=False, na=False)
+    ]
+    logging.info("%d posts contain Apple-related keywords.", len(apple_posts))
+    return apple_posts
+
+
+# -------------------------------------------
+# Apple Keyword Filtering
+# -------------------------------------------
+def categorize_posts_by_keywords(text, keyword_groups):
+    """
+    Categorize text based on predefined keyword groups.
+    """
+    matched_categories = []
+    text_lower = text.lower()
+    for category, keywords in keyword_groups.items():
+        if any(keyword in text_lower for keyword in keywords):
+            matched_categories.append(category)
+    return matched_categories
+
+
+def filter_and_categorize_apple_posts(df, keyword_groups):
+    """
+    Filter posts containing Apple-related keywords and categorize them.
 
     Args:
-        df (pd.DataFrame): DataFrame containing a 'text' column.
-        num_topics (int): Number of topics to generate.
-        n_top_words (int): Number of keywords to extract per topic.
+        df (pd.DataFrame): DataFrame containing 'text' column.
+        keyword_groups (dict): Dictionary of keyword categories.
 
     Returns:
-        tuple: (DataFrame with topic assignments, dictionary of topic keywords)
+        pd.DataFrame: Filtered and categorized posts.
     """
-    # Preprocess text
-    df["processed_text"] = df["text"]
+    keyword_regex = "|".join(
+        re.escape(keyword) for keyword in sum(keyword_groups.values(), [])
+    )
 
-    # Vectorize text
-    custom_stop_words = list(spacy.lang.en.stop_words.STOP_WORDS) + [
-        "yeah",
-        "fuck",
-        "man",
-        "thing",
-        "look",
-        "come",
-        "time",
-        "like",
-        "know",
+    # Filter posts containing Apple-related keywords
+    df_filtered = df[
+        df["text"].str.contains(keyword_regex, case=False, na=False)
     ]
 
-    vectorizer = CountVectorizer(
-        stop_words=custom_stop_words, max_features=5000, max_df=0.85, min_df=5
-    )
+    # Categorize posts
+    def join_categories(text):
+        categories = categorize_posts_by_keywords(text, keyword_groups)
+        return ", ".join(categories)  # Convert list to comma-separated string
 
-    text_matrix = vectorizer.fit_transform(df["processed_text"])
-
-    # Fit NMF model
-    nmf = NMF(n_components=num_topics, random_state=42)
-    nmf_matrix = nmf.fit_transform(text_matrix)
-
-    # Extract topic keywords
-    feature_names = vectorizer.get_feature_names_out()
-    topic_keywords = {
-        i: [
-            feature_names[word_idx]
-            for word_idx in topic.argsort()[: -n_top_words - 1 : -1]
-        ]
-        for i, topic in enumerate(nmf.components_)
-    }
-
-    # Assign most probable topic to each post
-    topic_assignments = nmf_matrix.argmax(axis=1)
-    df["topic"] = topic_assignments
-    df["topic_label"] = df["topic"].map(
-        lambda x: f"Topic {x}: {', '.join(topic_keywords[x])}"
-    )
-
-    return df, topic_keywords
+    df_filtered["categories"] = df_filtered["text"].apply(join_categories)
+    return df_filtered
 
 
 # -------------------------------------------
@@ -210,7 +192,8 @@ def create_posts_table(db_name="posts.db"):
             author TEXT,
             reply_to TEXT,
             created_at TEXT,
-            language TEXT
+            language TEXT,
+            categories TEXT
         )
     """
     )
@@ -258,25 +241,25 @@ if __name__ == "__main__":
 
     # Process the dataset in batches
     batch_size = 1000
-    max_batches = 5
+    max_batches = 5  # Remove limit on max_batches
     batch = []
     total_batches = 0
     total_posts = 0
+    apple_posts_count = 0
 
     for i, row in enumerate(dataset):
         # Preprocess text before language detection
-        preprocessed_text = preprocess_text(row["text"])
+        texts = [row["text"] for row in dataset]
+        preprocessed_texts = preprocess_texts_in_batch(texts)
 
         batch.append(
             {
                 "uri": row["uri"],
-                "text": preprocessed_text,  # Save preprocessed text
+                "text": preprocess_texts_in_batch,
                 "author": row["author"],
                 "reply_to": row["reply_to"],
                 "created_at": row["created_at"],
-                "language": detect_language(
-                    preprocessed_text
-                ),  # Detect language after preprocessing
+                "language": detect_language(preprocess_texts_in_batch),
             }
         )
 
@@ -285,81 +268,44 @@ if __name__ == "__main__":
             logging.info("Processing batch %d...", total_batches + 1)
             df = pd.DataFrame(batch)
 
-            # Debugging: Log created_at column samples
-            logging.debug(
-                "Sample 'created_at' values before processing: %s",
-                df["created_at"].head(),
-            )
-            logging.debug(
-                "Data types in 'created_at': %s", df["created_at"].dtype
-            )
-
             # Filter for English posts
             df = filter_english_posts(df)
 
-            # Write English posts to the database
-            if not df.empty:
-                insert_posts_to_db(df)
-                total_posts += len(df)
+            # Filter for Apple-related posts
+            df_apple = filter_and_categorize_apple_posts(df, KEYWORDS)
 
-            batch = []  # Clear the batch for the next set of rows
+            # Write Apple-related posts to the database
+            if not df_apple.empty:
+                insert_posts_to_db(df_apple)
+                apple_posts_count += len(df_apple)
+
+            batch = []  # Clear batch
             total_batches += 1
+            logging.info(
+                f"Processed {total_batches} batches, {apple_posts_count} Apple-related posts saved."
+            )
 
-            # Stop processing if max_batches is reached
-            if total_batches >= max_batches:
-                logging.info(
-                    "Reached batch limit of %d. Stopping pipeline.",
-                    max_batches,
-                )
-                break
-
-    # Process any remaining rows
-    if batch and total_batches < max_batches:
-        logging.info("Processing final batch...")
+    # Process remaining rows
+    if batch:
         df = pd.DataFrame(batch)
         df = filter_english_posts(df)
-        if not df.empty:
-            insert_posts_to_db(df)
-            total_posts += len(df)
+        df_apple = filter_and_categorize_apple_posts(df, KEYWORDS)
+        if not df_apple.empty:
+            insert_posts_to_db(df_apple)
+            apple_posts_count += len(df_apple)
 
     logging.info(
-        "ETL pipeline completed. Processed %d batches and inserted %d posts into the database.",
-        total_batches,
-        total_posts,
+        f"ETL pipeline completed. Total Apple-related posts: {apple_posts_count}."
     )
 
-    # Step 2: Reload data from the database
-    logging.info("Loading posts from the database for metrics calculation...")
+    # Reload data and calculate daily metrics
     conn = sqlite3.connect("posts.db")
     df_posts = pd.read_sql_query("SELECT * FROM posts", conn)
     conn.close()
 
-    # Perform topic modeling
-    num_topics = 5
-    df_with_topics, topics = perform_topic_modeling(
-        df_posts, num_topics=num_topics
-    )
-
-    # Display sample topics
-    print("Sample Topics Assigned to Posts:")
-    print(df_with_topics[["text", "topic_label"]].sample(10))
-
-    # Display extracted keywords for each topic
-    print("\nExtracted Topic Keywords:")
-    for topic, keywords in topics.items():
-        print(f"Topic {topic}: {', '.join(keywords)}")
-
-    # Step 3: Calculate daily metrics
-    df_with_topics = add_date_column(df_with_topics)
-
-    if not df_with_topics.empty:
-        logging.info("Calculating daily influencer metrics...")
-        daily_metrics = calculate_daily_metrics(df_with_topics)
-
-        # Display a sample of daily metrics
-        logging.info("Sample of Daily Metrics:")
+    # Add date column and calculate metrics
+    df_posts = add_date_column(df_posts)
+    if not df_posts.empty:
+        logging.info("Calculating daily metrics for Apple-related posts...")
+        daily_metrics = calculate_daily_metrics(df_posts)
         print(daily_metrics.sample(10))
-    else:
-        logging.warning(
-            "No posts were found in the database to calculate metrics."
-        )
