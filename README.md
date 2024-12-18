@@ -4,6 +4,31 @@ This repository provides a Python-based ETL pipeline that extracts posts from a 
 
 ---
 
+## Prerequisites
+- [Docker](https://docs.docker.com/get-docker/)
+
+## Building the Docker Image
+Run the following command to build the Docker image:
+```bash
+docker build -t bluesky_etl .
+```
+
+If you're using a machine with an ARM-based processor (e.g., Apple Silicon/M1/M2 Mac), you need to specify the --platform flag to emulate the amd64 architecture required by the build.
+```bash
+docker build -t --platform linux/amd64-t bluesky_etl .
+```
+
+## Running the Docker Image
+Run the following command to run the Docker image:
+```bash
+docker run -t bluesky_etl .
+```
+
+If you're using a machine with an ARM-based processor (e.g., Apple Silicon/M1/M2 Mac), you need to specify the --platform flag to emulate the amd64 architecture required by the build.
+```bash
+docker run -t --platform linux/amd64-t bluesky_etl .
+```
+
 ## Key Features
 
 ### 1. **Extraction**
@@ -36,30 +61,6 @@ The pipeline **upserts** daily metrics into a `metrics` table using **ON CONFLIC
 - **General User:** Falls outside the above categories.
 
 ---
-
-## Requirements
-
-- **Python** 3.8+ recommended.
-- Required packages:
-  - `pandas`
-  - `numpy`
-  - `datasets` (Hugging Face)
-  - `pandarallel`
-  - `sqlite3` (standard library)
-  - `re`, `time`, `logging` (standard libraries)
-- A local `metrics_calculator.py` script providing the following functions:
-  - `add_date_column`
-  - `calculate_daily_metrics`
-
-### Install Dependencies:
-```bash
-pip install pandas datasets pandarallel numpy
-```
-
-### Run Program:
-```bash
-python main.py
-```
 
 ### Script Workflow
 - Stream data from Hugging Face in batches.
