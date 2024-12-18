@@ -4,7 +4,6 @@ import logging
 import sqlite3
 from pandarallel import pandarallel
 from metrics_calculator import calculate_daily_metrics, add_date_column
-import re
 import time
 import functools
 
@@ -24,7 +23,7 @@ pandarallel.initialize(nb_workers=8, progress_bar=True, use_memory_fs=False)
 DB_NAME = "posts.db"
 BATCH_SIZE = 100000
 if testing is True:
-    MAX_BATCHES = 1
+    MAX_BATCHES = 5
 else:
     MAX_BATCHES = None
 
@@ -62,12 +61,6 @@ APPLE_KEYWORDS = [
     "apple care",
 ]
 
-# Precompile keyword regex
-APPLE_KEYWORDS_REGEX = re.compile(
-    r"|".join(rf"\b{re.escape(kw)}\b" for kw in APPLE_KEYWORDS), re.IGNORECASE
-)
-
-
 # -------------------------------------------
 # Functions
 # -------------------------------------------
@@ -101,7 +94,7 @@ def preload_existing_uris(db_name=DB_NAME):
 @timing_decorator
 def create_database(db_name=DB_NAME):
     """
-    Create a SQLite database and initialize the 'posts' table.
+    Create a SQLite database and initialize the 'posts' and 'metrics' tables.
 
     Args:
         db_name (str): Name of the SQLite database file.
@@ -138,7 +131,10 @@ def create_database(db_name=DB_NAME):
 
 @timing_decorator
 def drop_table(db_name=DB_NAME):
-    """Drop the 'posts' and 'metrics' table if they exist."""
+    """
+    Drop the 'posts' and 'metrics' table if they exist. 
+    Only use during testing if/when you need to start fresh.
+    """
     with sqlite3.connect(db_name) as conn:
         conn.execute("DROP TABLE IF EXISTS posts")
         conn.execute("DROP TABLE IF EXISTS metrics")
@@ -158,7 +154,6 @@ def insert_posts_to_db(df, db_name=DB_NAME):
         logging.info("No posts to insert into the database.")
         return
 
-    # Ensure schema is correct
     try:
         validate_posts_schema(db_name)
     except ValueError as e:
@@ -194,7 +189,7 @@ def validate_posts_schema(db_name=DB_NAME):
 
     with sqlite3.connect(db_name) as conn:
         # Validate the schema
-        cursor = conn.execute(f"PRAGMA table_info(posts)")
+        cursor = conn.execute("PRAGMA table_info(posts)")
         existing_columns = {row[1] for row in cursor.fetchall()}
 
     missing_columns = required_columns - existing_columns
@@ -224,8 +219,7 @@ def validate_metrics_schema(db_name=DB_NAME):
     }
 
     with sqlite3.connect(db_name) as conn:
-        # Validate the schema
-        cursor = conn.execute(f"PRAGMA table_info(metrics)")
+        cursor = conn.execute("PRAGMA table_info(metrics)")
         existing_columns = {row[1] for row in cursor.fetchall()}
 
     missing_columns = required_columns - existing_columns
@@ -247,7 +241,6 @@ def upsert_daily_metrics(new_metrics, db_name=DB_NAME):
     """
     logging.info("Upserting daily metrics into the database...")
 
-    # Ensure schema is correct
     try:
         validate_metrics_schema(db_name)
     except ValueError as e:
@@ -259,7 +252,9 @@ def upsert_daily_metrics(new_metrics, db_name=DB_NAME):
             try:
                 conn.execute(
                     """
-                    INSERT INTO metrics (date, author, post_count, replies_received, matched_keywords, engagement_ratio, influencer_type)
+                    INSERT INTO metrics (date, author, post_count, 
+                    replies_received, matched_keywords, engagement_ratio, 
+                    influencer_type)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(date, author) DO UPDATE SET
                         post_count=excluded.post_count,
@@ -292,7 +287,8 @@ def find_keywords(text_lower):
 
 @timing_decorator
 def process_batch(batch, existing_uris):
-    """Process a batch of data: filter duplicates and match Apple-related keywords."""
+    """Process a batch of data: filter duplicates 
+    and match Apple-related keywords."""
     df = pd.DataFrame(batch)
     logging.info("Filtering out existing URIs...")
     df = df[~df["uri"].isin(existing_uris)].copy()
@@ -300,9 +296,8 @@ def process_batch(batch, existing_uris):
         logging.info("No new URIs to process in this batch.")
         return df
 
-    # Replace the old regex-based keyword matching with the substring approach
     logging.info("Matching Apple-related keywords...")
-    df["text_lower"] = df["text"].str.lower()  # Convert once
+    df["text_lower"] = df["text"].str.lower()  
     df["matched_keywords"] = df["text_lower"].apply(find_keywords)
     df.drop(columns=["text_lower"], inplace=True)
 
@@ -361,7 +356,10 @@ if __name__ == "__main__":
                 break
 
     logging.info(
-        f"ETL pipeline completed. Total Apple-related posts: {apple_posts_count}."
+        """
+        ETL pipeline completed. 
+        Total Apple-related posts: {apple_posts_count}.
+        """
     )
 
     # Fetch posts and calculate metrics
@@ -378,11 +376,10 @@ if __name__ == "__main__":
         # Upsert metrics for each day into the database
         upsert_daily_metrics(daily_metrics)
 
-        # Display top 5 authors in each influencer category by their aggregated metrics
+        # Display top 5 authors in each influencer category
         logging.info("Displaying top 5 authors in each influencer category:")
         if "influencer_type" in daily_metrics.columns:
             # Aggregate metrics by category and author
-            # Summarize multiple days by summing or averaging relevant metrics
             agg_metrics = daily_metrics.groupby(
                 ["influencer_type", "author"], as_index=False
             ).agg(

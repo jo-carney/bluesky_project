@@ -9,3 +9,4 @@ _pycache_/
 
 # Docker files
 *.pyc
+.DS_Store
